@@ -1,5 +1,5 @@
 // Semillero: guarda la app para que abra aunque no haya internet.
-const CACHE = "semillero-v5";
+const CACHE = "semillero-v6";
 const BASE = ["./", "index.html", "manifest.webmanifest", "icono-192.png", "icono-512.png", "icono-180.png"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(BASE)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", e => {
