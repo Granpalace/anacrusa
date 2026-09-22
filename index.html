@@ -495,15 +495,43 @@ function midiDe(notas){
   return new Uint8Array([0x4D,0x54,0x68,0x64,0,0,0,6,0,0,0,1,(tpq>>8)&255,tpq&255,
     0x4D,0x54,0x72,0x6B,(L>>>24)&255,(L>>>16)&255,(L>>>8)&255,L&255, ...pista]);
 }
-async function exportarMidi(f, notas){
-  const nombre = ((f.titulo || "melodia").replace(/[^\p{L}\p{N} _-]/gu, "").trim().slice(0,40) || "melodia") + ".mid";
-  const archivo = new File([midiDe(notas || f.notas)], nombre, {type:"audio/midi"});
+const nombreArchivo = (f, ext) => ((f.titulo || "melodia").replace(/[^\p{L}\p{N} _-]/gu, "").trim().slice(0,40) || "melodia") + ext;
+/* Devuelve true si se entregó; false si el teléfono pide otro toque para compartir. */
+async function compartirArchivo(archivo){
   if(navigator.canShare && navigator.canShare({files:[archivo]})){
-    try{ await navigator.share({files:[archivo], title:nombre}); return; }catch(e){ if(e.name === "AbortError") return; }
+    try{ await navigator.share({files:[archivo]}); return true; }
+    catch(e){ if(e.name === "AbortError") return true; if(e.name === "NotAllowedError") return false; }
   }
-  const a = document.createElement("a"); a.href = URL.createObjectURL(archivo); a.download = nombre;
+  const a = document.createElement("a"); a.href = URL.createObjectURL(archivo); a.download = archivo.name;
   document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 3000);
-  toast("MIDI descargado: " + nombre);
+  toast("Descargado: " + archivo.name);
+  return true;
+}
+async function exportarMidi(f, notas){
+  // Tipo genérico: con "audio/midi" WhatsApp intenta tratarlo como audio y lo rechaza.
+  await compartirArchivo(new File([midiDe(notas || f.notas)], nombreArchivo(f, ".mid"), {type:"application/octet-stream"}));
+}
+const audiosListos = {};
+/* Toca la melodía con el instrumento elegido, sin sonido, y la entrega como archivo .wav */
+async function exportarAudio(f, instr){
+  const notas = f.notas; if(!notas || !notas.length) return;
+  const clave = f.id + "|" + instr + "|" + f.actualizado;
+  if(!audiosListos[clave]){
+    toast("Preparando el audio…");
+    const sr = 22050, ult = notas[notas.length-1], largo = (ult.t - notas[0].t) + Math.min(ult.d, 2.5) + 1.6;
+    const Off = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const ctx = new Off(1, Math.ceil(sr*largo), sr);
+    const salida = ctx.createGain(); salida.gain.value = 0.5; salida.connect(ctx.destination);
+    programarNotas(ctx, salida, notas, instr, 0.3, []);
+    const buf = await ctx.startRendering(), d = buf.getChannelData(0), n = d.length;
+    const ab = new ArrayBuffer(44 + n*2), v = new DataView(ab);
+    const w = (o, t) => [...t].forEach((c,i) => v.setUint8(o+i, c.charCodeAt(0)));
+    w(0,"RIFF"); v.setUint32(4,36+n*2,true); w(8,"WAVEfmt "); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+    v.setUint32(24,sr,true); v.setUint32(28,sr*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true); w(36,"data"); v.setUint32(40,n*2,true);
+    for(let i=0;i<n;i++) v.setInt16(44+i*2, Math.max(-1, Math.min(1, d[i]))*32767, true);
+    audiosListos[clave] = new File([ab], nombreArchivo(f, ".wav"), {type:"audio/wav"});
+  }
+  if(!(await compartirArchivo(audiosListos[clave]))) toast("Audio listo. Toca Audio otra vez para compartirlo.");
 }
 
 function bucle(){
@@ -689,8 +717,15 @@ function tocarNotas(f, instr){
   // En iPhone el sonido puede quedar "interrumpido" al cambiar de modo; se reanuda solo.
   ctx.onstatechange = () => { if(reproduciendo && reproduciendo.tipo === "notas" && ctx.state !== "running" && ctx.state !== "closed") ctx.resume().catch(()=>{}); };
   const salida = ctx.createGain(); salida.gain.value = 0.35; salida.connect(ctx.destination);
-  const t0 = ctx.currentTime + 0.2, base = f.notas[0].t; let fin = 0; const nodos = [];
-  for(const n of f.notas){
+  const nodos = [], fin = programarNotas(ctx, salida, f.notas, instr, ctx.currentTime + 0.2, nodos);
+  const tm = setTimeout(() => pararTodo(), (fin - ctx.currentTime) * 1000 + 100);
+  reproduciendo = { id:f.id, tipo:"notas", parar(){ clearTimeout(tm); sonidoIOS(false); try{ salida.disconnect(); }catch(e){} nodos.forEach(o => { try{ o.stop(); }catch(e){} }); } };
+  renderLista();
+}
+
+function programarNotas(ctx, salida, notas, instr, t0, nodos){
+  const base = notas[0].t; let fin = 0;
+  for(const n of notas){
     const ini = t0 + (n.t - base), d = Math.max(0.12, Math.min(n.d, 2.5)), fr = 440 * 2 ** ((n.m - 69)/12);
     const g = ctx.createGain(); g.connect(salida); g.gain.setValueAtTime(0, ini);
     const o = ctx.createOscillator(); o.connect(g); o.frequency.value = fr; nodos.push(o);
@@ -709,9 +744,7 @@ function tocarNotas(f, instr){
       o.start(ini); o.stop(ini + d + 0.45); fin = Math.max(fin, ini + d + 0.45);
     }
   }
-  const tm = setTimeout(() => pararTodo(), (fin - ctx.currentTime) * 1000 + 100);
-  reproduciendo = { id:f.id, tipo:"notas", parar(){ clearTimeout(tm); sonidoIOS(false); try{ salida.disconnect(); }catch(e){} nodos.forEach(o => { try{ o.stop(); }catch(e){} }); } };
-  renderLista();
+  return fin;
 }
 
 /* ============ Libreta ============ */
@@ -789,7 +822,7 @@ function tarjeta(f, nuevo){
            : (f.tipo === "melodia" ? `<span class="ton">No se detectaron notas en esta grabación</span>` : "")}
         <span class="der">
           <button class="acc solo-icono fav" data-a="fav" aria-pressed="${f.fav}" aria-label="Favorita">${ICON.estrella}</button>
-          ${f.notas && f.notas.length ? `<button class="acc chico" data-a="midi" aria-label="Exportar MIDI">MIDI</button>` : ""}
+          ${f.notas && f.notas.length ? `<button class="acc chico" data-a="wav" aria-label="Compartir como audio">Audio</button><button class="acc chico" data-a="midi" aria-label="Exportar MIDI">MIDI</button>` : ""}
           ${f.texto ? `<button class="acc solo-icono" data-a="copiar" aria-label="Copiar texto">${ICON.copiar}</button>` : ""}
           <button class="acc solo-icono" data-a="editar" aria-label="Editar">${ICON.editar}</button>
           <button class="acc solo-icono peligro" data-a="borrar" aria-label="Borrar">${ICON.borrar}</button>
@@ -825,6 +858,7 @@ $("#lista").addEventListener("click", async e => {
   else if(a === "editar"){ editando = id; confirmando = null; borrador = null; renderLista(); const t = document.getElementById("ed-x-"+id); t && t.focus(); }
   else if(a === "cancelarEd"){ editando = null; borrador = null; renderLista(); }
   else if(a === "midi") exportarMidi(f);
+  else if(a === "wav") exportarAudio(f, instrElegido[id] || "piano");
   else if(["selNota","notaBaja","notaSube","notaOir","notaQuitar","octBaja","octSube","oirBorrador","reanalizar"].includes(a)){
     const bd = leerBorrador(f), n = bd.sel !== null ? bd.notas[bd.sel] : null;
     if(a === "selNota"){ const i = +b.dataset.i; bd.sel = bd.sel === i ? null : i; const x = bd.notas[i]; if(bd.sel !== null) tocarNotas({id:f.id, notas:[{m:x.m, t:0, d:Math.min(x.d, 0.6)}]}, instrElegido[id] || "piano"); }
