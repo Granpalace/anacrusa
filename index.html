@@ -341,6 +341,9 @@ function detectarTono(buf, sr){
   let best=-1, pos=-1;
   for(let i=Math.max(d,minLag); i<=maxLag; i++) if(c[i] > best){ best=c[i]; pos=i; }
   if(pos < 1 || best/c[0] < 0.5) return {f:-1, rms};
+  // Un silbido es casi una onda pura: sus picos en T, 2T, 3T… son casi iguales. Se toma el primero
+  // que llega al 85% del máximo, para no confundir la nota con una octava más grave.
+  for(let i=Math.max(d,minLag); i<pos; i++) if(c[i] >= 0.85*best && c[i] >= c[i-1] && c[i] >= c[i+1]){ pos = i; break; }
   const x1=c[pos-1], x2=c[pos], x3=c[pos+1]; const a=(x1+x3-2*x2)/2, b=(x3-x1)/2;
   const T = a ? pos - b/(2*a) : pos;
   return {f: sr/T, rms};
@@ -598,7 +601,7 @@ let ctxSintesis, silencioIOS;
 /* En iPhone con el interruptor en silencio, el sintetizador no suena. Un audio mudo en bucle
    cambia el modo de sonido a "reproducción" mientras se tocan las notas. */
 function sonidoIOS(activar){
-  try{ if(navigator.audioSession) navigator.audioSession.type = activar ? "playback" : "auto"; }catch(e){}
+  if(navigator.audioSession){ try{ navigator.audioSession.type = activar ? "playback" : "auto"; }catch(e){} return; }
   try{
     if(activar){
       if(!silencioIOS){
@@ -617,10 +620,14 @@ function tocarNotas(f, instr){
   pararTodo();
   if(!f.notas || !f.notas.length) return;
   const Ctx = window.AudioContext || window.webkitAudioContext;
+  if(ctxSintesis && ctxSintesis.state === "closed") ctxSintesis = null;
+  ctxSintesis = ctxSintesis || new Ctx(); const ctx = ctxSintesis;
+  if(ctx.state !== "running") ctx.resume().catch(()=>{});
   sonidoIOS(true);
-  ctxSintesis = ctxSintesis || new Ctx(); const ctx = ctxSintesis; if(ctx.state === "suspended") ctx.resume();
+  // En iPhone el sonido puede quedar "interrumpido" al cambiar de modo; se reanuda solo.
+  ctx.onstatechange = () => { if(reproduciendo && reproduciendo.tipo === "notas" && ctx.state !== "running" && ctx.state !== "closed") ctx.resume().catch(()=>{}); };
   const salida = ctx.createGain(); salida.gain.value = 0.35; salida.connect(ctx.destination);
-  const t0 = ctx.currentTime + 0.06, base = f.notas[0].t; let fin = 0; const nodos = [];
+  const t0 = ctx.currentTime + 0.2, base = f.notas[0].t; let fin = 0; const nodos = [];
   for(const n of f.notas){
     const ini = t0 + (n.t - base), d = Math.max(0.12, Math.min(n.d, 2.5)), fr = 440 * 2 ** ((n.m - 69)/12);
     const g = ctx.createGain(); g.connect(salida); g.gain.setValueAtTime(0, ini);
@@ -683,7 +690,7 @@ function tarjeta(f, nuevo){
   } else {
     cuerpo = `<h3>${esc(f.titulo)}</h3>`
       + (f.texto && f.texto.toLowerCase() !== f.titulo.toLowerCase() ? `<p class="cuerpo">${esc(f.texto)}</p>` : "")
-      + (f.notas && f.notas.length ? `<div class="notas">${f.notas.slice(0,40).map(n=>"<span>"+esc(nombreNota(n.m))+"</span>").join("")}${f.notas.length>40?"<span>…</span>":""}</div>` : "")
+      + (f.notas && f.notas.length ? `<div class="ton">${f.notas.length} ${f.notas.length === 1 ? "nota" : "notas"}</div><div class="notas">${f.notas.slice(0,40).map(n=>"<span>"+esc(nombreNota(n.m))+"</span>").join("")}${f.notas.length>40?"<span>…</span>":""}</div>` : "")
       + (f.tonalidad ? `<div class="ton">Tonalidad probable: <b>${esc(nombreTonalidad(f.tonalidad))}</b></div>` : "")
       + ((f.etiquetas||[]).length ? `<div class="etqs">${f.etiquetas.map(e=>`<span class="etq">#${esc(e)}</span>`).join("")}</div>` : "");
   }
