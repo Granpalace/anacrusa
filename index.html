@@ -334,7 +334,7 @@ function detectarTono(buf, sr){
   for(let i=0;i<N;i++) rms += buf[i]*buf[i];
   rms = Math.sqrt(rms/N);
   if(rms < 0.01) return {f:-1, rms};
-  const minLag = Math.floor(sr/1100), maxLag = Math.min(Math.floor(sr/65), N-1);
+  const minLag = Math.floor(sr/2600), maxLag = Math.min(Math.floor(sr/65), N-1);
   const c = new Float32Array(maxLag+2);
   for(let lag=0; lag<=maxLag+1; lag++){ let s=0; for(let j=0;j<N-lag;j++) s += buf[j]*buf[j+lag]; c[lag]=s; }
   let d = 1; while(d < maxLag && c[d] > c[d+1]) d++;
@@ -594,11 +594,30 @@ async function tocarAudio(f){
   try{ await a.play(); }catch(e){ reproduciendo = null; return toast("No se pudo reproducir este audio en este navegador"); }
   renderLista();
 }
-let ctxSintesis;
+let ctxSintesis, silencioIOS;
+/* En iPhone con el interruptor en silencio, el sintetizador no suena. Un audio mudo en bucle
+   cambia el modo de sonido a "reproducción" mientras se tocan las notas. */
+function sonidoIOS(activar){
+  try{ if(navigator.audioSession) navigator.audioSession.type = activar ? "playback" : "auto"; }catch(e){}
+  try{
+    if(activar){
+      if(!silencioIOS){
+        const sr = 8000, n = sr/2, b = new ArrayBuffer(44 + n), v = new DataView(b);
+        const w = (o, t) => [...t].forEach((c,i) => v.setUint8(o+i, c.charCodeAt(0)));
+        w(0,"RIFF"); v.setUint32(4, 36+n, true); w(8,"WAVEfmt "); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+        v.setUint32(24,sr,true); v.setUint32(28,sr,true); v.setUint16(32,1,true); v.setUint16(34,8,true); w(36,"data"); v.setUint32(40,n,true);
+        for(let i=0;i<n;i++) v.setUint8(44+i,128);
+        silencioIOS = new Audio(URL.createObjectURL(new Blob([b],{type:"audio/wav"}))); silencioIOS.loop = true;
+      }
+      silencioIOS.play().catch(()=>{});
+    } else if(silencioIOS) silencioIOS.pause();
+  }catch(e){}
+}
 function tocarNotas(f, instr){
   pararTodo();
   if(!f.notas || !f.notas.length) return;
   const Ctx = window.AudioContext || window.webkitAudioContext;
+  sonidoIOS(true);
   ctxSintesis = ctxSintesis || new Ctx(); const ctx = ctxSintesis; if(ctx.state === "suspended") ctx.resume();
   const salida = ctx.createGain(); salida.gain.value = 0.35; salida.connect(ctx.destination);
   const t0 = ctx.currentTime + 0.06, base = f.notas[0].t; let fin = 0; const nodos = [];
@@ -622,7 +641,7 @@ function tocarNotas(f, instr){
     }
   }
   const tm = setTimeout(() => pararTodo(), (fin - ctx.currentTime) * 1000 + 100);
-  reproduciendo = { id:f.id, tipo:"notas", parar(){ clearTimeout(tm); try{ salida.disconnect(); }catch(e){} nodos.forEach(o => { try{ o.stop(); }catch(e){} }); } };
+  reproduciendo = { id:f.id, tipo:"notas", parar(){ clearTimeout(tm); sonidoIOS(false); try{ salida.disconnect(); }catch(e){} nodos.forEach(o => { try{ o.stop(); }catch(e){} }); } };
   renderLista();
 }
 
@@ -673,7 +692,8 @@ function tarjeta(f, nuevo){
     : editando === f.id ? "" : `<div class="acciones">
         ${f.tieneAudio ? `<button class="acc" data-a="audio">${sonando==="audio"?ICON.stop+" Detener":ICON.play+" Escuchar"}</button>` : ""}
         ${f.notas && f.notas.length ? `<button class="acc" data-a="notas">${sonando==="notas"?ICON.stop+" Detener":ICON.notas+" Tocar notas"}</button>
-           <select class="instr" data-a="instr" aria-label="Instrumento" id="in-${f.id}"><option value="piano">Piano</option><option value="flauta">Flauta</option><option value="marimba">Marimba</option></select>` : ""}
+           <select class="instr" data-a="instr" aria-label="Instrumento" id="in-${f.id}"><option value="piano">Piano</option><option value="flauta">Flauta</option><option value="marimba">Marimba</option></select>`
+           : (f.tipo === "melodia" ? `<span class="ton">No se detectaron notas en esta grabación</span>` : "")}
         <span class="der">
           <button class="acc solo-icono fav" data-a="fav" aria-pressed="${f.fav}" aria-label="Favorita">${ICON.estrella}</button>
           ${f.texto ? `<button class="acc solo-icono" data-a="copiar" aria-label="Copiar texto">${ICON.copiar}</button>` : ""}
