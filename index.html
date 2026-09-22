@@ -333,7 +333,7 @@ function detectarTono(buf, sr){
   const N = buf.length; let rms = 0;
   for(let i=0;i<N;i++) rms += buf[i]*buf[i];
   rms = Math.sqrt(rms/N);
-  if(rms < 0.01) return {f:-1, rms};
+  if(rms < 0.0015) return {f:-1, rms};  // el micrófono del iPhone entrega niveles bajos: un silbido ronda 0,003–0,02
   const minLag = Math.floor(sr/2600), maxLag = Math.min(Math.floor(sr/65), N-1);
   const c = new Float32Array(maxLag+2);
   for(let lag=0; lag<=maxLag+1; lag++){ let s=0; for(let j=0;j<N-lag;j++) s += buf[j]*buf[j+lag]; c[lag]=s; }
@@ -346,7 +346,9 @@ function detectarTono(buf, sr){
   for(let i=Math.max(d,minLag); i<pos; i++) if(c[i] >= 0.85*best && c[i] >= c[i-1] && c[i] >= c[i+1]){ pos = i; break; }
   const x1=c[pos-1], x2=c[pos], x3=c[pos+1]; const a=(x1+x3-2*x2)/2, b=(x3-x1)/2;
   const T = a ? pos - b/(2*a) : pos;
-  return {f: sr/T, rms};
+  const f = sr/T;
+  if(f < 200 && rms < 0.004) return {f:-1, rms};   // zumbidos graves y débiles: ruido, no una nota
+  return {f, rms};
 }
 
 /* ============ Grabación ============ */
