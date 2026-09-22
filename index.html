@@ -145,6 +145,12 @@ select.instr{border:1px solid var(--line);background:var(--surface);border-radiu
 .editor input,.editor textarea{width:100%;border:1px solid var(--line);background:var(--surface-2);border-radius:8px;padding:8px 10px}
 .editor textarea{min-height:90px;resize:vertical}
 .editor label{font-size:12px;color:var(--muted);display:grid;gap:3px}
+.ed-notas{display:grid;gap:8px;background:var(--surface-2);border-radius:10px;padding:10px}
+.ed-notas .cab{font-size:12px;color:var(--muted)}
+.notas.edit{gap:5px}
+.notas.edit button{font:12.5px var(--mono);border:1px solid transparent;background:var(--melodia-soft);color:var(--melodia);border-radius:6px;padding:3px 7px}
+.notas.edit button.sel{background:var(--melodia);color:var(--surface);}
+.acc.chico{padding:4px 8px;font-size:12.5px}
 .confirmar{display:flex;gap:6px;align-items:center;font-size:13px;flex-wrap:wrap}
 
 /* Ajustes */
@@ -436,6 +442,70 @@ function cerrarNota(r, fin){
   r.cur = null;
 }
 
+function pasoTono(tr, t, f){
+  if(f > 0){
+    const m = 69 + 12*Math.log2(f/440), mr = Math.round(m);
+    if(tr.cur !== null && Math.abs(m - tr.cur) < 0.6){ tr.ultVoz = t; tr.cand = null; tr.candN = 0; }
+    else{
+      if(mr === tr.cand) tr.candN++; else { tr.cand = mr; tr.candN = 1; tr.candIni = t; }
+      if(tr.candN >= 3){ cerrarNota(tr, tr.candIni); tr.cur = mr; tr.curIni = tr.candIni; tr.ultVoz = t; tr.cand = null; tr.candN = 0; }
+    }
+  } else if(tr.cur !== null && t - tr.ultVoz > 0.14) cerrarNota(tr, tr.ultVoz);
+}
+
+/* Vuelve a sacar las notas de un audio ya guardado, con el detector actual. */
+async function analizarAudio(blob, progreso){
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  ctxSintesis = ctxSintesis && ctxSintesis.state !== "closed" ? ctxSintesis : new Ctx();
+  const audio = await ctxSintesis.decodeAudioData(await blob.arrayBuffer());
+  const datos = audio.getChannelData(0), sr = audio.sampleRate, N = 2048, paso = Math.round(sr/30);
+  const tr = {notas:[], cur:null, curIni:0, ultVoz:0, cand:null, candN:0, candIni:0};
+  let k = 0, vuelta = 0;
+  for(; k + N <= datos.length; k += paso){
+    pasoTono(tr, k/sr, detectarTono(datos.subarray(k, k+N), sr).f);
+    if(++vuelta % 40 === 0){ progreso && progreso(k/datos.length); await new Promise(r => setTimeout(r, 0)); }
+  }
+  if(tr.cur !== null) cerrarNota(tr, Math.max(tr.ultVoz, tr.curIni + 0.1));
+  return tr.notas;
+}
+
+async function obtenerAudio(f){
+  let blob = await audioGet(f.id);
+  if(!blob && f.tieneAudio && cfg.url){
+    toast("Descargando audio…");
+    const r = await api("audio", {id:f.id}); blob = b64aBlob(r.b64, r.mime || f.mime); await audioPut(f.id, blob);
+  }
+  return blob;
+}
+
+/* Archivo MIDI (formato 0) a 120 pulsos por minuto: 1 segundo = 2 negras. */
+function midiDe(notas){
+  const tpq = 480, porSeg = tpq*2, base = notas.length ? notas[0].t : 0, ev = [];
+  for(const n of notas){
+    const on = Math.round((n.t - base)*porSeg), off = Math.max(on + 1, Math.round((n.t - base + n.d)*porSeg));
+    const m = Math.max(0, Math.min(127, n.m));
+    ev.push({t:on, b:[0x90, m, 90]}, {t:off, b:[0x80, m, 0]});
+  }
+  ev.sort((a,b) => a.t - b.t || a.b[0] - b.b[0]);
+  const vlq = v => { const o = [v & 0x7f]; while(v >>= 7) o.unshift((v & 0x7f) | 0x80); return o; };
+  const pista = [0,0xFF,0x51,3,0x07,0xA1,0x20, 0,0xFF,0x58,4,4,2,24,8, 0,0xC0,0];
+  let ant = 0; for(const e of ev){ pista.push(...vlq(e.t - ant), ...e.b); ant = e.t; }
+  pista.push(0,0xFF,0x2F,0);
+  const L = pista.length;
+  return new Uint8Array([0x4D,0x54,0x68,0x64,0,0,0,6,0,0,0,1,(tpq>>8)&255,tpq&255,
+    0x4D,0x54,0x72,0x6B,(L>>>24)&255,(L>>>16)&255,(L>>>8)&255,L&255, ...pista]);
+}
+async function exportarMidi(f, notas){
+  const nombre = ((f.titulo || "melodia").replace(/[^\p{L}\p{N} _-]/gu, "").trim().slice(0,40) || "melodia") + ".mid";
+  const archivo = new File([midiDe(notas || f.notas)], nombre, {type:"audio/midi"});
+  if(navigator.canShare && navigator.canShare({files:[archivo]})){
+    try{ await navigator.share({files:[archivo], title:nombre}); return; }catch(e){ if(e.name === "AbortError") return; }
+  }
+  const a = document.createElement("a"); a.href = URL.createObjectURL(archivo); a.download = nombre;
+  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 3000);
+  toast("MIDI descargado: " + nombre);
+}
+
 function bucle(){
   if(!rec) return;
   const t = (performance.now() - rec.t0)/1000;
@@ -445,18 +515,8 @@ function bucle(){
   let rms = 0;
   if(rec.modo === "melodia" && rec.frame % 2 === 0){
     const r = detectarTono(rec.buf, rec.ctx.sampleRate); rms = r.rms;
-    if(r.f > 0){
-      const m = 69 + 12*Math.log2(r.f/440), mr = Math.round(m);
-      rec.traza.push({t, m});
-      if(rec.cur !== null && Math.abs(m - rec.cur) < 0.6){ rec.ultVoz = t; rec.cand = null; rec.candN = 0; }
-      else{
-        if(mr === rec.cand) rec.candN++; else { rec.cand = mr; rec.candN = 1; rec.candIni = t; }
-        if(rec.candN >= 3){ cerrarNota(rec, rec.candIni); rec.cur = mr; rec.curIni = rec.candIni; rec.ultVoz = t; rec.cand = null; rec.candN = 0; }
-      }
-    } else {
-      rec.traza.push({t, m:null});
-      if(rec.cur !== null && t - rec.ultVoz > 0.14) cerrarNota(rec, rec.ultVoz);
-    }
+    rec.traza.push({t, m: r.f > 0 ? 69 + 12*Math.log2(r.f/440) : null});
+    pasoTono(rec, t, r.f);
     while(rec.traza.length && rec.traza[0].t < t - 7) rec.traza.shift();
     dibujarMelodia(t);
   } else {
@@ -655,7 +715,17 @@ function tocarNotas(f, instr){
 }
 
 /* ============ Libreta ============ */
-let filtro = "todos", busqueda = "", editando = null, confirmando = null;
+let filtro = "todos", busqueda = "", editando = null, confirmando = null, borrador = null;
+/* Copia de trabajo del fragmento que se edita: guarda lo escrito antes de redibujar. */
+function leerBorrador(f){
+  if(!borrador || borrador.id !== f.id)
+    borrador = {id:f.id, titulo:f.titulo, texto:f.texto || "", etiquetas:(f.etiquetas||[]).join(", "), notas:(f.notas||[]).map(n => ({...n})), sel:null};
+  const v = s => document.getElementById(s + f.id);
+  if(v("ed-t-")) borrador.titulo = v("ed-t-").value;
+  if(v("ed-x-")) borrador.texto = v("ed-x-").value;
+  if(v("ed-e-")) borrador.etiquetas = v("ed-e-").value;
+  return borrador;
+}
 const TIPOS = { letra:["Letra","--letra"], melodia:["Melodía","--melodia"], ambiente:["Ambiente","--ambiente"], texto:["Escrita","--texto"] };
 function fechaCorta(iso){
   const d = new Date(iso), hoy = new Date(), ay = new Date(); ay.setDate(hoy.getDate()-1);
@@ -683,10 +753,24 @@ function tarjeta(f, nuevo){
   const ej = f.ejemplo ? ' · ejemplo' : "";
   let cuerpo = "";
   if(editando === f.id){
+    const bd = borrador && borrador.id === f.id ? borrador : {titulo:f.titulo, texto:f.texto, etiquetas:(f.etiquetas||[]).join(", "), notas:f.notas||[], sel:null};
+    const conNotas = f.tipo === "melodia";
+    const sel = bd.sel;
     cuerpo = `<div class="editor">
-      <label>Título<input data-campo="titulo" id="ed-t-${f.id}" value="${esc(f.titulo)}"></label>
-      <label>${f.tipo === "melodia" || f.tipo === "ambiente" ? "Notas / descripción" : "Letra o texto"}<textarea data-campo="texto" id="ed-x-${f.id}">${esc(f.texto)}</textarea></label>
-      <label>Etiquetas (separadas por coma)<input data-campo="etiquetas" id="ed-e-${f.id}" value="${esc((f.etiquetas||[]).join(", "))}" placeholder="coro, triste, 6/8"></label>
+      <label>Título<input data-campo="titulo" id="ed-t-${f.id}" value="${esc(bd.titulo)}"></label>
+      <label>${f.tipo === "melodia" || f.tipo === "ambiente" ? "Notas / descripción" : "Letra o texto"}<textarea data-campo="texto" id="ed-x-${f.id}">${esc(bd.texto)}</textarea></label>
+      <label>Etiquetas (separadas por coma)<input data-campo="etiquetas" id="ed-e-${f.id}" value="${esc(bd.etiquetas)}" placeholder="coro, triste, 6/8"></label>
+      ${conNotas ? `<div class="ed-notas">
+        <div class="cab">${bd.notas.length} notas${estimarTonalidad(bd.notas) ? " · " + esc(nombreTonalidad(estimarTonalidad(bd.notas))) : ""} · toca una nota para corregirla</div>
+        <div class="notas edit">${bd.notas.map((n,i) => `<button data-a="selNota" data-i="${i}" class="${i===sel?"sel":""}">${esc(nombreNota(n.m))}</button>`).join("") || '<span class="ton">Sin notas</span>'}</div>
+        ${sel !== null && bd.notas[sel] ? `<div class="acciones"><span class="ton">${esc(nombreNota(bd.notas[sel].m))}:</span>
+          <button class="acc chico" data-a="notaBaja">− ½ tono</button><button class="acc chico" data-a="notaSube">+ ½ tono</button>
+          <button class="acc chico" data-a="notaOir">Oír</button><button class="acc chico peligro" data-a="notaQuitar">Quitar</button></div>` : ""}
+        <div class="acciones">
+          <button class="acc chico" data-a="octBaja">Bajar una octava</button><button class="acc chico" data-a="octSube">Subir una octava</button>
+          ${bd.notas.length ? `<button class="acc chico" data-a="oirBorrador">${ICON.notas} Tocar</button>` : ""}
+          ${f.tieneAudio ? `<button class="acc chico" data-a="reanalizar">Volver a analizar el audio</button>` : ""}
+        </div></div>` : ""}
       <div class="acciones"><button class="acc" data-a="guardarEd">Guardar cambios</button><button class="acc" data-a="cancelarEd">Cancelar</button></div>
     </div>`;
   } else {
@@ -705,6 +789,7 @@ function tarjeta(f, nuevo){
            : (f.tipo === "melodia" ? `<span class="ton">No se detectaron notas en esta grabación</span>` : "")}
         <span class="der">
           <button class="acc solo-icono fav" data-a="fav" aria-pressed="${f.fav}" aria-label="Favorita">${ICON.estrella}</button>
+          ${f.notas && f.notas.length ? `<button class="acc chico" data-a="midi" aria-label="Exportar MIDI">MIDI</button>` : ""}
           ${f.texto ? `<button class="acc solo-icono" data-a="copiar" aria-label="Copiar texto">${ICON.copiar}</button>` : ""}
           <button class="acc solo-icono" data-a="editar" aria-label="Editar">${ICON.editar}</button>
           <button class="acc solo-icono peligro" data-a="borrar" aria-label="Borrar">${ICON.borrar}</button>
@@ -737,13 +822,38 @@ $("#lista").addEventListener("click", async e => {
   else if(a === "notas"){ if(reproduciendo && reproduciendo.id === id && reproduciendo.tipo === "notas") pararTodo(); else tocarNotas(f, instrElegido[id] || "piano"); }
   else if(a === "fav") actualizar(f, {fav: !f.fav});
   else if(a === "copiar"){ try{ await navigator.clipboard.writeText(f.texto); toast("Texto copiado"); }catch(err){ toast("No se pudo copiar"); } }
-  else if(a === "editar"){ editando = id; confirmando = null; renderLista(); const t = document.getElementById("ed-x-"+id); t && t.focus(); }
-  else if(a === "cancelarEd"){ editando = null; renderLista(); }
+  else if(a === "editar"){ editando = id; confirmando = null; borrador = null; renderLista(); const t = document.getElementById("ed-x-"+id); t && t.focus(); }
+  else if(a === "cancelarEd"){ editando = null; borrador = null; renderLista(); }
+  else if(a === "midi") exportarMidi(f);
+  else if(["selNota","notaBaja","notaSube","notaOir","notaQuitar","octBaja","octSube","oirBorrador","reanalizar"].includes(a)){
+    const bd = leerBorrador(f), n = bd.sel !== null ? bd.notas[bd.sel] : null;
+    if(a === "selNota"){ const i = +b.dataset.i; bd.sel = bd.sel === i ? null : i; const x = bd.notas[i]; if(bd.sel !== null) tocarNotas({id:f.id, notas:[{m:x.m, t:0, d:Math.min(x.d, 0.6)}]}, instrElegido[id] || "piano"); }
+    else if(a === "notaBaja" && n){ n.m--; tocarNotas({id:f.id, notas:[{m:n.m, t:0, d:0.4}]}, instrElegido[id] || "piano"); }
+    else if(a === "notaSube" && n){ n.m++; tocarNotas({id:f.id, notas:[{m:n.m, t:0, d:0.4}]}, instrElegido[id] || "piano"); }
+    else if(a === "notaOir" && n){ tocarNotas({id:f.id, notas:[{m:n.m, t:0, d:Math.min(n.d, 1)}]}, instrElegido[id] || "piano"); }
+    else if(a === "notaQuitar" && n){ bd.notas.splice(bd.sel, 1); bd.sel = null; }
+    else if(a === "octBaja"){ bd.notas.forEach(x => x.m -= 12); }
+    else if(a === "octSube"){ bd.notas.forEach(x => x.m += 12); }
+    else if(a === "oirBorrador"){ tocarNotas({id:f.id, notas:bd.notas}, instrElegido[id] || "piano"); }
+    else if(a === "reanalizar"){
+      try{
+        const blob = await obtenerAudio(f); if(!blob) return toast("No encuentro el audio de este fragmento");
+        toast("Analizando el audio…");
+        const notas = await analizarAudio(blob, p => toast("Analizando el audio… " + Math.round(p*100) + " %"));
+        bd.notas = notas; bd.sel = null;
+        toast(notas.length ? "Encontré " + notas.length + " notas. Revisa y toca Guardar cambios." : "No encontré notas en este audio");
+      }catch(err){ toast("No pude analizar el audio: " + err.message); }
+    }
+    renderLista();
+  }
   else if(a === "guardarEd"){
-    const titulo = document.getElementById("ed-t-"+id).value.trim() || f.titulo;
-    const texto = document.getElementById("ed-x-"+id).value.trim();
-    const etiquetas = document.getElementById("ed-e-"+id).value.split(",").map(s=>s.trim().replace(/^#/,"")).filter(Boolean);
-    editando = null; await actualizar(f, {titulo, texto, etiquetas}); toast("Cambios guardados");
+    const bd = leerBorrador(f);
+    const titulo = bd.titulo.trim() || f.titulo;
+    const texto = bd.texto.trim();
+    const etiquetas = bd.etiquetas.split(",").map(s=>s.trim().replace(/^#/,"")).filter(Boolean);
+    const cambios = {titulo, texto, etiquetas};
+    if(f.tipo === "melodia"){ cambios.notas = bd.notas; cambios.tonalidad = estimarTonalidad(bd.notas); }
+    editando = null; borrador = null; await actualizar(f, cambios); toast("Cambios guardados");
   }
   else if(a === "borrar"){ confirmando = id; renderLista(); }
   else if(a === "borrarNo"){ confirmando = null; renderLista(); }
