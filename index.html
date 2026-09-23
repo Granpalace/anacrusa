@@ -339,22 +339,92 @@ function detectarTono(buf, sr){
   const N = buf.length; let rms = 0;
   for(let i=0;i<N;i++) rms += buf[i]*buf[i];
   rms = Math.sqrt(rms/N);
-  if(rms < 0.0015) return {f:-1, rms};  // el micrófono del iPhone entrega niveles bajos: un silbido ronda 0,003–0,02
-  const minLag = Math.floor(sr/2600), maxLag = Math.min(Math.floor(sr/65), N-1);
+  if(rms < 0.0015) return {f:-1, rms};  // el micrófono del iPhone entrega niveles bajos
+  const minLag = Math.floor(sr/2600), maxLag = Math.min(Math.floor(sr/65), N-2);
   const c = new Float32Array(maxLag+2);
-  for(let lag=0; lag<=maxLag+1; lag++){ let s=0; for(let j=0;j<N-lag;j++) s += buf[j]*buf[j+lag]; c[lag]=s; }
+  // Se compensa que los desfases largos suman menos términos (si no, las voces graves parecen "ruido").
+  for(let lag=0; lag<=maxLag+1; lag++){ let s=0; for(let j=0;j<N-lag;j++) s += buf[j]*buf[j+lag]; c[lag]=s*N/(N-lag); }
   let d = 1; while(d < maxLag && c[d] > c[d+1]) d++;
   let best=-1, pos=-1;
   for(let i=Math.max(d,minLag); i<=maxLag; i++) if(c[i] > best){ best=c[i]; pos=i; }
-  if(pos < 1 || best/c[0] < 0.5) return {f:-1, rms};
-  // Un silbido es casi una onda pura: sus picos en T, 2T, 3T… son casi iguales. Se toma el primero
-  // que llega al 85% del máximo, para no confundir la nota con una octava más grave.
+  if(pos < 1 || best/c[0] < 0.6) return {f:-1, rms};
+  // Silbidos y voces limpias: sus picos en T, 2T, 3T… son casi iguales. Se toma el primero
+  // que llega al 85% del máximo, para no bajar la nota una octava.
   for(let i=Math.max(d,minLag); i<pos; i++) if(c[i] >= 0.85*best && c[i] >= c[i-1] && c[i] >= c[i+1]){ pos = i; break; }
   const x1=c[pos-1], x2=c[pos], x3=c[pos+1]; const a=(x1+x3-2*x2)/2, b=(x3-x1)/2;
   const T = a ? pos - b/(2*a) : pos;
-  const f = sr/T;
-  if(f < 200 && rms < 0.004) return {f:-1, rms};   // zumbidos graves y débiles: ruido, no una nota
-  return {f, rms};
+  return {f: sr/T, rms};
+}
+
+/* ============ De la curva de tono a notas ============
+   cuadros: [{t, m (tono en semitonos MIDI, con decimales) o null, rms}]
+   Una voz real no es una escalera: sube y baja, tiene vibrato y se desliza entre notas.
+   Por eso se suaviza la curva, se corta en notas solo cuando el cambio de tono se sostiene,
+   y también cuando la voz re-ataca (baja el volumen y vuelve a subir, como en "la-la-la"). */
+function segmentarNotas(cuadros, paso){
+  const med = a => { const s = [...a].sort((x,y)=>x-y), k = s.length>>1; return s.length%2 ? s[k] : (s[k-1]+s[k])/2; };
+  // 1) mediana de 5 cuadros sobre los cuadros con tono: quita saltos sueltos y errores de octava
+  const m = cuadros.map((c,i) => {
+    if(c.m === null) return null;
+    const v = []; for(let k=i-2;k<=i+2;k++) if(cuadros[k] && cuadros[k].m !== null) v.push(cuadros[k].m);
+    return med(v);
+  });
+  const notas = []; let cur = null, silencio = 0, desvio = [], pico = 0, valle = false;
+  const cerrar = fin => {
+    if(!cur) return;
+    const d = fin - cur.ini;
+    if(d >= 0.08) notas.push({m: Math.round(med(cur.ms)), t: +cur.ini.toFixed(2), d: +d.toFixed(2)});
+    cur = null; desvio = []; pico = 0; valle = false;
+  };
+  const abrir = (i) => { cur = {ini: cuadros[i].t, ms: [m[i]], ult: cuadros[i].t}; pico = cuadros[i].rms; valle = false; };
+  for(let i=0;i<cuadros.length;i++){
+    const c = cuadros[i];
+    if(m[i] === null){
+      silencio++;
+      if(cur && silencio*paso >= 0.09) cerrar(cur.ult + paso);
+      continue;
+    }
+    silencio = 0;
+    if(!cur){ abrir(i); continue; }
+    // re-ataque: el volumen cae bajo el 35% del máximo de la nota y vuelve sobre el 60%
+    if(c.rms < 0.35*pico) valle = true;
+    else if(valle && c.rms > 0.6*pico && cur.ms.length >= 3){ cerrar(c.t); abrir(i); continue; }
+    pico = Math.max(pico, c.rms);
+    const ref = med(cur.ms.slice(-8));
+    if(Math.abs(m[i] - ref) > 0.75){
+      desvio.push(i);
+      // el nuevo tono se sostuvo ~100 ms: empieza otra nota desde el primer cuadro distinto
+      if(desvio.length >= 3){
+        const j = desvio[0]; cerrar(cuadros[j].t);
+        abrir(j); for(const k of desvio.slice(1)){ cur.ms.push(m[k]); cur.ult = cuadros[k].t; }
+      }
+    } else {
+      for(const k of desvio) cur.ms.push(m[k]);
+      desvio = []; cur.ms.push(m[i]); cur.ult = c.t;
+    }
+  }
+  if(cur) cerrar(cur.ult + paso);
+  // notas de paso (deslizamientos entre dos notas): si duran menos de 0,15 s y están pegadas
+  // a otra nota, se suman a la vecina más larga
+  const pegada = (a, b) => b.t - (a.t + a.d) < 0.06;
+  for(let i=0;i<notas.length;i++){
+    const n = notas[i]; if(n.d >= 0.15) continue;
+    const ant = notas[i-1] && pegada(notas[i-1], n) ? notas[i-1] : null;
+    const sig = notas[i+1] && pegada(n, notas[i+1]) ? notas[i+1] : null;
+    const dest = ant && sig ? (ant.d >= sig.d ? ant : sig) : (ant || sig);
+    if(!dest) continue;
+    if(dest === ant) ant.d = +(n.t + n.d - ant.t).toFixed(2);
+    else { sig.d = +(sig.t + sig.d - n.t).toFixed(2); sig.t = n.t; }
+    notas.splice(i, 1); i--;
+  }
+  // notas muy seguidas con el mismo tono y casi sin pausa: una sola
+  const out = [];
+  for(const n of notas){
+    const p = out[out.length-1];
+    if(p && p.m === n.m && n.t - (p.t + p.d) < 0.04) p.d = +(n.t + n.d - p.t).toFixed(2);
+    else out.push(n);
+  }
+  return out;
 }
 
 /* ============ Grabación ============ */
@@ -397,7 +467,7 @@ async function iniciar(){
   const an = ctx.createAnalyser(); an.fftSize = 2048; fuente.connect(an);
 
   rec = { modo, stream, mr, trozos, mime: (mr && mr.mimeType) || mime || "audio/webm", ctx, an, buf:new Float32Array(an.fftSize),
-          t0: performance.now(), texto:"", prov:"", notas:[], traza:[], cur:null, curIni:0, ultVoz:0, cand:null, candN:0, candIni:0, frame:0, wake:null, sr:null, srFallo:false };
+          t0: performance.now(), texto:"", prov:"", notas:[], traza:[], cuadros:[], cur:null, curIni:0, ultVoz:0, cand:null, candN:0, candIni:0, frame:0, wake:null, sr:null, srFallo:false };
 
   try{ if(navigator.wakeLock) rec.wake = await navigator.wakeLock.request("screen"); }catch(e){}
 
@@ -459,14 +529,14 @@ async function analizarAudio(blob, progreso){
   ctxSintesis = ctxSintesis && ctxSintesis.state !== "closed" ? ctxSintesis : new Ctx();
   const audio = await ctxSintesis.decodeAudioData(await blob.arrayBuffer());
   const datos = audio.getChannelData(0), sr = audio.sampleRate, N = 2048, paso = Math.round(sr/30);
-  const tr = {notas:[], cur:null, curIni:0, ultVoz:0, cand:null, candN:0, candIni:0};
+  const cuadros = [];
   let k = 0, vuelta = 0;
   for(; k + N <= datos.length; k += paso){
-    pasoTono(tr, k/sr, detectarTono(datos.subarray(k, k+N), sr).f);
+    const r = detectarTono(datos.subarray(k, k+N), sr);
+    cuadros.push({t: k/sr, m: r.f > 0 ? 69 + 12*Math.log2(r.f/440) : null, rms: r.rms});
     if(++vuelta % 40 === 0){ progreso && progreso(k/datos.length); await new Promise(r => setTimeout(r, 0)); }
   }
-  if(tr.cur !== null) cerrarNota(tr, Math.max(tr.ultVoz, tr.curIni + 0.1));
-  return tr.notas;
+  return segmentarNotas(cuadros, paso/sr);
 }
 
 async function obtenerAudio(f){
@@ -544,6 +614,7 @@ function bucle(){
   if(rec.modo === "melodia" && rec.frame % 2 === 0){
     const r = detectarTono(rec.buf, rec.ctx.sampleRate); rms = r.rms;
     rec.traza.push({t, m: r.f > 0 ? 69 + 12*Math.log2(r.f/440) : null});
+    rec.cuadros.push({t, m: r.f > 0 ? 69 + 12*Math.log2(r.f/440) : null, rms: r.rms});
     pasoTono(rec, t, r.f);
     while(rec.traza.length && rec.traza[0].t < t - 7) rec.traza.shift();
     dibujarMelodia(t);
@@ -577,10 +648,19 @@ async function detener(){
 
   if(dur < 0.6){ prepararVivo(modoActual()); return toast("Muy corto: no se guardó"); }
   const texto = (r.texto + (r.prov ? " " + r.prov : "")).trim();
-  const ton = r.modo === "melodia" ? estimarTonalidad(r.notas) : null;
+  let notas = [];
+  if(r.modo === "melodia"){
+    // Las notas finales salen del audio grabado (más preciso que lo que se alcanzó a ver en vivo).
+    const n = r.cuadros.length, paso = n > 1 ? (r.cuadros[n-1].t - r.cuadros[0].t)/(n-1) : 1/30;
+    notas = segmentarNotas(r.cuadros, paso);
+    if(blob && blob.size && dur < 120){
+      try{ toast("Analizando las notas…"); notas = await analizarAudio(blob); }catch(e){}
+    }
+  }
+  const ton = r.modo === "melodia" ? estimarTonalidad(notas) : null;
   const f = {
-    id: uid(), tipo: r.modo, titulo: tituloAuto(r.modo, texto, r.notas), texto,
-    notas: r.modo === "melodia" ? r.notas : [], tonalidad: ton, etiquetas: [], fav: false,
+    id: uid(), tipo: r.modo, titulo: tituloAuto(r.modo, texto, notas), texto,
+    notas, tonalidad: ton, etiquetas: [], fav: false,
     creado: ahora(), actualizado: ahora(), dur: +dur.toFixed(1),
     mime: blob ? blob.type : "", tieneAudio: !!(blob && blob.size), estado: "pendiente", audioSubido: false
   };
