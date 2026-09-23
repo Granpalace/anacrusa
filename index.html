@@ -103,6 +103,10 @@ header.top{display:flex;align-items:center;gap:12px;padding-block:6px 14px}
 .rec:active{transform:scale(.96)}
 .rec .cuadro{width:30px;height:30px;border-radius:50%;background:#fff;transition:border-radius .2s,width .2s,height .2s}
 .rec[aria-pressed="true"] .cuadro{width:28px;height:28px;border-radius:6px}
+.vivo.latido{box-shadow:inset 0 0 0 3px var(--melodia)}
+.vivo.latido.fuerte{box-shadow:inset 0 0 0 5px var(--rec)}
+.ritmo{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:13px}
+.ritmo b{font-variant-numeric:tabular-nums;min-width:2.2em;text-align:center}
 .rec.guardar-texto{background:var(--texto);box-shadow:0 0 0 4px var(--texto-soft)}
 .rec.guardar-texto .cuadro{display:none}
 .rec.guardar-texto span{font-weight:700;font-size:14px}
@@ -245,6 +249,12 @@ dialog::backdrop{background:rgba(10,10,20,.5)}
     <label for="cfgNotacion">Nombres de las notas
       <select id="cfgNotacion"><option value="do">Do Re Mi</option><option value="c">C D E</option></select>
     </label>
+    <label for="cfgPulso">Pulso al grabar melodías
+      <select id="cfgPulso"><option value="no">Sin pulso</option><option value="ver">Pulso visual (parpadeo)</option><option value="sonar">Pulso con sonido (mejor con audífonos)</option></select>
+    </label>
+    <label for="cfgBpm">Velocidad del pulso (negras por minuto)
+      <input id="cfgBpm" type="number" min="40" max="200" step="1" inputmode="numeric">
+    </label>
     <div class="estado-prueba" id="estadoPrueba"></div>
     <div class="fila">
       <button type="button" class="btn" id="btnProbar">Probar conexión</button>
@@ -278,7 +288,7 @@ const ICON = {
 
 /* ============ Configuración (solo este equipo) ============ */
 const CFG_KEY = "semillero.cfg";
-let cfg = { url:"", clave:"", notacion:"do" };
+let cfg = { url:"", clave:"", notacion:"do", pulso:"no", bpm:90 };
 try { Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY) || "{}")); } catch(e){}
 function guardarCfg(){ try{ localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); }catch(e){} }
 
@@ -363,7 +373,10 @@ function detectarTono(buf, sr){
    Una voz real no es una escalera: sube y baja, tiene vibrato y se desliza entre notas.
    Por eso se suaviza la curva, se corta en notas solo cuando el cambio de tono se sostiene,
    y también cuando la voz re-ataca (baja el volumen y vuelve a subir, como en "la-la-la"). */
-function segmentarNotas(cuadros, paso){
+function segmentarNotas(cuadros, paso, P){
+  P = Object.assign({valle:0.65, ton:0.9, snap:0.6}, P||{});
+  const r = cuadros.map(c => c.rms), W = Math.max(3, Math.round(0.15/paso));
+  const esValle = i => { if(!(r[i] <= r[i-1] && r[i] <= r[i+1])) return false; let a=0,b=0; for(let k=Math.max(0,i-W);k<i;k++) a=Math.max(a,r[k]); for(let k=i+1;k<=Math.min(r.length-1,i+W);k++) b=Math.max(b,r[k]); return r[i] < P.valle*Math.min(a,b); };
   const med = a => { const s = [...a].sort((x,y)=>x-y), k = s.length>>1; return s.length%2 ? s[k] : (s[k-1]+s[k])/2; };
   // 1) mediana de 5 cuadros sobre los cuadros con tono: quita saltos sueltos y errores de octava
   const m = cuadros.map((c,i) => {
@@ -375,7 +388,7 @@ function segmentarNotas(cuadros, paso){
   const cerrar = fin => {
     if(!cur) return;
     const d = fin - cur.ini;
-    if(d >= 0.08) notas.push({m: Math.round(med(cur.ms)), t: +cur.ini.toFixed(2), d: +d.toFixed(2)});
+    if(d >= 0.08){ const x = med(cur.ms); notas.push({m: Math.round(x), x, t: +cur.ini.toFixed(2), d: +d.toFixed(2)}); }
     cur = null; desvio = []; pico = 0; valle = false;
   };
   const abrir = (i) => { cur = {ini: cuadros[i].t, ms: [m[i]], ult: cuadros[i].t}; pico = cuadros[i].rms; valle = false; };
@@ -389,11 +402,9 @@ function segmentarNotas(cuadros, paso){
     silencio = 0;
     if(!cur){ abrir(i); continue; }
     // re-ataque: el volumen cae bajo el 35% del máximo de la nota y vuelve sobre el 60%
-    if(c.rms < 0.35*pico) valle = true;
-    else if(valle && c.rms > 0.6*pico && cur.ms.length >= 3){ cerrar(c.t); abrir(i); continue; }
-    pico = Math.max(pico, c.rms);
+    if(cur.ms.length >= 3 && i > 0 && i < cuadros.length-1 && esValle(i)){ cerrar(c.t); abrir(i); continue; }
     const ref = med(cur.ms.slice(-8));
-    if(Math.abs(m[i] - ref) > 0.75){
+    if(Math.abs(m[i] - ref) > P.ton){
       desvio.push(i);
       // el nuevo tono se sostuvo ~100 ms: empieza otra nota desde el primer cuadro distinto
       if(desvio.length >= 3){
@@ -426,7 +437,64 @@ function segmentarNotas(cuadros, paso){
     if(p && p.m === n.m && n.t - (p.t + p.d) < 0.04) p.d = +(n.t + n.d - p.t).toFixed(2);
     else out.push(n);
   }
+  // Ajuste a la tonalidad: una nota fuera de la escala que quedó cerca de una nota de la escala
+  // casi siempre es una nota de la escala cantada un poco desafinada.
+  const ton = estimarTonalidad(out);
+  if(ton && P.snap > 0){
+    const esc = (ton.modo === "mayor" ? [0,2,4,5,7,9,11] : [0,2,3,5,7,8,10]).map(g => (g + ton.tonica) % 12);
+    const en = k => esc.includes(((k%12)+12)%12);
+    for(const q of out){
+      if(en(q.m) || q.x === undefined) continue;
+      const c = [q.m-1, q.m+1].filter(en).sort((a,b) => Math.abs(a-q.x) - Math.abs(b-q.x))[0];
+      if(c !== undefined && Math.abs(c - q.x) < P.snap) q.m = c;
+    }
+  }
+  for(const q of out) delete q.x;
   return out;
+}
+
+
+/* ============ Pulso y ajuste a la grilla ============
+   estimarPulso: busca el pulso (una negra) que mejor explica dónde empiezan y terminan las notas.
+   Si se grabó con metrónomo, el pulso ya se conoce y solo se busca dónde cae el primer tiempo.
+   cuantizar: mueve cada inicio y cada duración a la subdivisión más cercana de ese pulso. */
+function errorGrilla(notas, P, fase){
+  const g = P/2; let err = 0;
+  for(const n of notas){ const x = (n.t - fase)/g; err += Math.abs(x - Math.round(x)); }
+  for(const n of notas){ const x = n.d/g; err += 0.5*Math.abs(x - Math.max(1, Math.round(x))); }
+  return err/(notas.length*1.5);
+}
+function mejorFase(notas, P){
+  let mejor = null;
+  for(let f = 0; f < P; f += 0.01){
+    const fase = notas[0].t - f, e = errorGrilla(notas, P, fase);
+    if(!mejor || e < mejor.e) mejor = {fase, e};
+  }
+  return mejor;
+}
+function estimarPulso(notas, bpmFijo){
+  if(!notas || notas.length < 3) return null;
+  if(bpmFijo){ const P = 60/bpmFijo; return {bpm: bpmFijo, fase: +mejorFase(notas, P).fase.toFixed(3)}; }
+  let mejor = null;
+  for(let P=0.33; P<=1.2; P+=0.005){
+    const bpm = 60/P, costo = errorGrilla(notas, P, notas[0].t) + 0.25*Math.abs(Math.log2(bpm/95));
+    if(!mejor || costo < mejor.costo) mejor = {P, costo};
+  }
+  const bpm = Math.round(60/mejor.P);
+  return {bpm, fase: +mejorFase(notas, 60/bpm).fase.toFixed(3)};
+}
+function cuantizar(notas, pulso, div){
+  if(!div || !pulso) return notas.map(n => ({...n}));
+  const P = 60/pulso.bpm, g = P/div, f0 = pulso.fase;
+  const out = notas.map(n => {
+    const ini = f0 + Math.round((n.t - f0)/g)*g, fin = f0 + Math.round((n.t + n.d - f0)/g)*g;
+    return {m:n.m, t:ini, d:Math.max(g, fin - ini)};
+  });
+  for(let i=1;i<out.length;i++){   // dos notas no pueden empezar juntas ni pisarse
+    if(out[i].t <= out[i-1].t + 1e-6) out[i].t = out[i-1].t + g;
+    if(out[i-1].t + out[i-1].d > out[i].t) out[i-1].d = Math.max(g, out[i].t - out[i-1].t);
+  }
+  return out.map(n => ({m:n.m, t:+n.t.toFixed(3), d:+n.d.toFixed(3)}));
 }
 
 /* ============ Grabación ============ */
@@ -467,7 +535,14 @@ async function iniciar(){
   $("#btnRec").setAttribute("aria-pressed","true"); $("#btnRec").setAttribute("aria-label","Cancelar");
   if(modo === "melodia"){
     const el = document.createElement("div"); el.className = "cuenta-atras"; $("#vivo").appendChild(el);
-    for(const n of ["3","2","1"]){
+    if(cfg.pulso !== "no"){
+      const P = 60000/(cfg.bpm || 90);
+      for(const n of ["1","2","3","4"]){
+        el.innerHTML = n + "<small>entra en el próximo 1</small>"; latido(ctx, n === "1");
+        await new Promise(r => setTimeout(r, P));
+        if(c.cancelada) break;
+      }
+    } else for(const n of ["3","2","1"]){
       el.innerHTML = n + "<small>prepárate</small>";
       await new Promise(r => setTimeout(r, 450));
       if(c.cancelada) break;
@@ -489,7 +564,10 @@ async function iniciar(){
     mr.start(1000);
   }
 
-  rec = { modo, stream, mr, trozos, mime: (mr && mr.mimeType) || mime || "audio/webm", ctx, an, buf:new Float32Array(an.fftSize),
+  const metro = modo === "melodia" && cfg.pulso !== "no" ? (cfg.bpm || 90) : 0;
+  let pulsoT = null;
+  if(metro){ let k = 0; latido(ctx, true); pulsoT = setInterval(() => { k++; latido(ctx, k % 4 === 0); }, 60000/metro); }
+  rec = { metro, pulsoT, modo, stream, mr, trozos, mime: (mr && mr.mimeType) || mime || "audio/webm", ctx, an, buf:new Float32Array(an.fftSize),
           t0: performance.now(), texto:"", prov:"", notas:[], traza:[], cuadros:[], cur:null, curIni:0, ultVoz:0, cand:null, candN:0, candIni:0, frame:0, wake:null, sr:null, srFallo:false };
 
   try{ if(navigator.wakeLock) rec.wake = await navigator.wakeLock.request("screen"); }catch(e){}
@@ -499,6 +577,19 @@ async function iniciar(){
   $("#btnRec").setAttribute("aria-pressed","true"); $("#btnRec").setAttribute("aria-label","Detener y guardar");
   $("#pista").textContent = "Grabando… toca de nuevo para detener y guardar.";
   bucle();
+}
+
+/* Un tiempo del pulso: el panel parpadea y, si se eligió, suena un click corto */
+function latido(ctx, fuerte){
+  const v = $("#vivo"); v.classList.add("latido"); v.classList.toggle("fuerte", !!fuerte);
+  setTimeout(() => v.classList.remove("latido","fuerte"), 110);
+  if(cfg.pulso === "sonar" && ctx && ctx.state !== "closed"){
+    try{
+      const o = ctx.createOscillator(), g = ctx.createGain(), t = ctx.currentTime;
+      o.frequency.value = fuerte ? 1600 : 1100; g.gain.setValueAtTime(0.25, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+      o.connect(g); g.connect(ctx.destination); o.start(t); o.stop(t + 0.06);
+    }catch(e){}
+  }
 }
 
 function iniciarReconocimiento(){
@@ -572,8 +663,11 @@ async function obtenerAudio(f){
 }
 
 /* Archivo MIDI (formato 0) a 120 pulsos por minuto: 1 segundo = 2 negras. */
-function midiDe(notas){
-  const tpq = 480, porSeg = tpq*2, base = notas.length ? notas[0].t : 0, ev = [];
+function midiDe(notas, pulso){
+  const bpm = pulso && pulso.bpm ? pulso.bpm : 120, P = 60/bpm, tpq = 480, porSeg = tpq*bpm/60, ev = [];
+  const t0 = notas.length ? notas[0].t : 0;
+  const base = pulso && pulso.div ? pulso.fase + Math.floor((t0 - pulso.fase)/P + 1e-6)*P : t0;
+  const us = Math.round(60e6/bpm);
   for(const n of notas){
     const on = Math.round((n.t - base)*porSeg), off = Math.max(on + 1, Math.round((n.t - base + n.d)*porSeg));
     const m = Math.max(0, Math.min(127, n.m));
@@ -581,7 +675,7 @@ function midiDe(notas){
   }
   ev.sort((a,b) => a.t - b.t || a.b[0] - b.b[0]);
   const vlq = v => { const o = [v & 0x7f]; while(v >>= 7) o.unshift((v & 0x7f) | 0x80); return o; };
-  const pista = [0,0xFF,0x51,3,0x07,0xA1,0x20, 0,0xFF,0x58,4,4,2,24,8, 0,0xC0,0];
+  const pista = [0,0xFF,0x51,3,(us>>16)&255,(us>>8)&255,us&255, 0,0xFF,0x58,4,4,2,24,8, 0,0xC0,0];
   let ant = 0; for(const e of ev){ pista.push(...vlq(e.t - ant), ...e.b); ant = e.t; }
   pista.push(0,0xFF,0x2F,0);
   const L = pista.length;
@@ -602,7 +696,7 @@ async function compartirArchivo(archivo){
 }
 async function exportarMidi(f, notas){
   // Tipo genérico: con "audio/midi" WhatsApp intenta tratarlo como audio y lo rechaza.
-  await compartirArchivo(new File([midiDe(notas || f.notas)], nombreArchivo(f, ".mid"), {type:"application/octet-stream"}));
+  await compartirArchivo(new File([midiDe(notas || f.notas, f.pulso)], nombreArchivo(f, ".mid"), {type:"application/octet-stream"}));
 }
 const audiosListos = {};
 /* Toca la melodía con el instrumento elegido, sin sonido, y la entrega como archivo .wav */
@@ -656,6 +750,7 @@ async function detener(){
   const r = rec; rec = null;
   const dur = (performance.now() - r.t0)/1000;
   if(r.modo === "melodia") cerrarNota(r, r.cur !== null ? Math.max(r.ultVoz, r.curIni + 0.1) : 0);
+  if(r.pulsoT) clearInterval(r.pulsoT);
   if(r.sr){ try{ r.sr.onend = null; r.sr.stop(); }catch(e){} }
   let blob = null;
   if(r.mr){
@@ -680,10 +775,15 @@ async function detener(){
       try{ toast("Analizando las notas…"); notas = await analizarAudio(blob); }catch(e){}
     }
   }
+  let crudas = null, pulso = null;
+  if(r.modo === "melodia" && notas.length >= 3){
+    const p = estimarPulso(notas, r.metro || 0);
+    if(p){ crudas = notas; pulso = {bpm:p.bpm, fase:p.fase, div:4}; notas = cuantizar(crudas, pulso, 4); }
+  }
   const ton = r.modo === "melodia" ? estimarTonalidad(notas) : null;
   const f = {
     id: uid(), tipo: r.modo, titulo: tituloAuto(r.modo, texto, notas), texto,
-    notas, tonalidad: ton, etiquetas: [], fav: false,
+    notas, crudas, pulso, tonalidad: ton, etiquetas: [], fav: false,
     creado: ahora(), actualizado: ahora(), dur: +dur.toFixed(1),
     mime: blob ? blob.type : "", tieneAudio: !!(blob && blob.size), estado: "pendiente", audioSubido: false
   };
@@ -859,10 +959,21 @@ function programarNotas(ctx, salida, notas, instr, t0, nodos){
 
 /* ============ Libreta ============ */
 let filtro = "todos", busqueda = "", editando = null, confirmando = null, borrador = null;
+function nuevoBorrador(f){
+  const crudas = (f.crudas && f.crudas.length === (f.notas||[]).length ? f.crudas : (f.notas||[])).map(n => ({...n}));
+  let pulso = f.pulso ? {...f.pulso} : null;
+  if(!pulso){ const p = estimarPulso(crudas); pulso = p ? {bpm:p.bpm, fase:p.fase, div:0} : {bpm:90, fase:0, div:0}; }
+  return {id:f.id, titulo:f.titulo, texto:f.texto || "", etiquetas:(f.etiquetas||[]).join(", "), crudas, pulso,
+          notas:(f.notas||[]).map(n => ({...n})), sel:null};
+}
+function reajustar(bd){
+  if(bd.crudas.length >= 2){ const p = estimarPulso(bd.crudas, bd.pulso.bpm); if(p) bd.pulso.fase = p.fase; }
+  bd.notas = cuantizar(bd.crudas, bd.pulso, bd.pulso.div);
+}
 /* Copia de trabajo del fragmento que se edita: guarda lo escrito antes de redibujar. */
 function leerBorrador(f){
   if(!borrador || borrador.id !== f.id)
-    borrador = {id:f.id, titulo:f.titulo, texto:f.texto || "", etiquetas:(f.etiquetas||[]).join(", "), notas:(f.notas||[]).map(n => ({...n})), sel:null};
+    borrador = nuevoBorrador(f);
   const v = s => document.getElementById(s + f.id);
   if(v("ed-t-")) borrador.titulo = v("ed-t-").value;
   if(v("ed-x-")) borrador.texto = v("ed-x-").value;
@@ -896,7 +1007,7 @@ function tarjeta(f, nuevo){
   const ej = f.ejemplo ? ' · ejemplo' : "";
   let cuerpo = "";
   if(editando === f.id){
-    const bd = borrador && borrador.id === f.id ? borrador : {titulo:f.titulo, texto:f.texto, etiquetas:(f.etiquetas||[]).join(", "), notas:f.notas||[], sel:null};
+    const bd = borrador && borrador.id === f.id ? borrador : nuevoBorrador(f);
     const conNotas = f.tipo === "melodia";
     const sel = bd.sel;
     cuerpo = `<div class="editor">
@@ -909,6 +1020,11 @@ function tarjeta(f, nuevo){
         ${sel !== null && bd.notas[sel] ? `<div class="acciones"><span class="ton">${esc(nombreNota(bd.notas[sel].m))}:</span>
           <button class="acc chico" data-a="notaBaja">− ½ tono</button><button class="acc chico" data-a="notaSube">+ ½ tono</button>
           <button class="acc chico" data-a="notaOir">Oír</button><button class="acc chico peligro" data-a="notaQuitar">Quitar</button></div>` : ""}
+        ${bd.notas.length >= 2 ? `<div class="ritmo">Pulso ♩ =
+          <button class="acc chico" data-a="bpmMenos" aria-label="Pulso más lento">−</button><b>${bd.pulso.bpm}</b><button class="acc chico" data-a="bpmMas" aria-label="Pulso más rápido">+</button>
+          · Ajustar a <select class="instr" data-a="div" id="ed-div-${f.id}" aria-label="Ajustar el ritmo">
+            ${[[0,"sin ajustar"],[1,"negras"],[2,"corcheas"],[4,"semicorcheas"]].map(([v,t]) => `<option value="${v}"${bd.pulso.div===v?" selected":""}>${t}</option>`).join("")}
+          </select></div>` : ""}
         <div class="acciones">
           <button class="acc chico" data-a="octBaja">Bajar una octava</button><button class="acc chico" data-a="octSube">Subir una octava</button>
           ${bd.notas.length ? `<button class="acc chico" data-a="oirBorrador">${ICON.notas} Tocar</button>` : ""}
@@ -920,7 +1036,7 @@ function tarjeta(f, nuevo){
     cuerpo = `<h3>${esc(f.titulo)}</h3>`
       + (f.texto && f.texto.toLowerCase() !== f.titulo.toLowerCase() ? `<p class="cuerpo">${esc(f.texto)}</p>` : "")
       + (f.notas && f.notas.length ? `<div class="ton">${f.notas.length} ${f.notas.length === 1 ? "nota" : "notas"}</div><div class="notas">${f.notas.slice(0,40).map(n=>"<span>"+esc(nombreNota(n.m))+"</span>").join("")}${f.notas.length>40?"<span>…</span>":""}</div>` : "")
-      + (f.tonalidad ? `<div class="ton">Tonalidad probable: <b>${esc(nombreTonalidad(f.tonalidad))}</b></div>` : "")
+      + (f.tonalidad || (f.pulso && f.pulso.div) ? `<div class="ton">${f.tonalidad ? `Tonalidad probable: <b>${esc(nombreTonalidad(f.tonalidad))}</b>` : ""}${f.tonalidad && f.pulso && f.pulso.div ? " · " : ""}${f.pulso && f.pulso.div ? `Pulso ♩ = <b>${f.pulso.bpm}</b>` : ""}</div>` : "")
       + ((f.etiquetas||[]).length ? `<div class="etqs">${f.etiquetas.map(e=>`<span class="etq">#${esc(e)}</span>`).join("")}</div>` : "");
   }
   const acciones = confirmando === f.id
@@ -956,6 +1072,10 @@ async function actualizar(f, cambios){
 }
 $("#lista").addEventListener("change", e => {
   if(e.target.dataset.a === "instr"){ const id = e.target.closest(".frag").dataset.id; instrElegido[id] = e.target.value; }
+  if(e.target.dataset.a === "div"){
+    const f = frags.find(x => x.id === e.target.closest(".frag").dataset.id); if(!f) return;
+    const bd = leerBorrador(f); bd.pulso.div = +e.target.value; bd.sel = null; reajustar(bd); renderLista();
+  }
 });
 $("#lista").addEventListener("click", async e => {
   const b = e.target.closest("[data-a]"); if(!b || b.tagName === "SELECT") return;
@@ -969,22 +1089,25 @@ $("#lista").addEventListener("click", async e => {
   else if(a === "cancelarEd"){ editando = null; borrador = null; renderLista(); }
   else if(a === "midi") exportarMidi(f);
   else if(a === "wav") exportarAudio(f, instrElegido[id] || "piano");
-  else if(["selNota","notaBaja","notaSube","notaOir","notaQuitar","octBaja","octSube","oirBorrador","reanalizar"].includes(a)){
+  else if(["selNota","notaBaja","notaSube","notaOir","notaQuitar","octBaja","octSube","oirBorrador","reanalizar","bpmMenos","bpmMas"].includes(a)){
     const bd = leerBorrador(f), n = bd.sel !== null ? bd.notas[bd.sel] : null;
     if(a === "selNota"){ const i = +b.dataset.i; bd.sel = bd.sel === i ? null : i; const x = bd.notas[i]; if(bd.sel !== null) tocarNotas({id:f.id, notas:[{m:x.m, t:0, d:Math.min(x.d, 0.6)}]}, instrElegido[id] || "piano"); }
-    else if(a === "notaBaja" && n){ n.m--; tocarNotas({id:f.id, notas:[{m:n.m, t:0, d:0.4}]}, instrElegido[id] || "piano"); }
-    else if(a === "notaSube" && n){ n.m++; tocarNotas({id:f.id, notas:[{m:n.m, t:0, d:0.4}]}, instrElegido[id] || "piano"); }
+    else if(a === "notaBaja" && n){ n.m--; if(bd.crudas[bd.sel]) bd.crudas[bd.sel].m = n.m; tocarNotas({id:f.id, notas:[{m:n.m, t:0, d:0.4}]}, instrElegido[id] || "piano"); }
+    else if(a === "notaSube" && n){ n.m++; if(bd.crudas[bd.sel]) bd.crudas[bd.sel].m = n.m; tocarNotas({id:f.id, notas:[{m:n.m, t:0, d:0.4}]}, instrElegido[id] || "piano"); }
     else if(a === "notaOir" && n){ tocarNotas({id:f.id, notas:[{m:n.m, t:0, d:Math.min(n.d, 1)}]}, instrElegido[id] || "piano"); }
-    else if(a === "notaQuitar" && n){ bd.notas.splice(bd.sel, 1); bd.sel = null; }
-    else if(a === "octBaja"){ bd.notas.forEach(x => x.m -= 12); }
-    else if(a === "octSube"){ bd.notas.forEach(x => x.m += 12); }
+    else if(a === "notaQuitar" && n){ bd.notas.splice(bd.sel, 1); bd.crudas.splice(bd.sel, 1); bd.sel = null; }
+    else if(a === "bpmMenos" || a === "bpmMas"){ bd.pulso.bpm = Math.max(40, Math.min(200, bd.pulso.bpm + (a === "bpmMas" ? 1 : -1))); if(!bd.pulso.div) bd.pulso.div = 4; reajustar(bd); }
+    else if(a === "octBaja"){ bd.notas.forEach(x => x.m -= 12); bd.crudas.forEach(x => x.m -= 12); }
+    else if(a === "octSube"){ bd.notas.forEach(x => x.m += 12); bd.crudas.forEach(x => x.m += 12); }
     else if(a === "oirBorrador"){ tocarNotas({id:f.id, notas:bd.notas}, instrElegido[id] || "piano"); }
     else if(a === "reanalizar"){
       try{
         const blob = await obtenerAudio(f); if(!blob) return toast("No encuentro el audio de este fragmento");
         toast("Analizando el audio…");
         const notas = await analizarAudio(blob, p => toast("Analizando el audio… " + Math.round(p*100) + " %"));
-        bd.notas = notas; bd.sel = null;
+        bd.crudas = notas; bd.sel = null;
+        const p = estimarPulso(notas); if(p){ bd.pulso = {bpm:p.bpm, fase:p.fase, div: bd.pulso.div || 4}; }
+        bd.notas = cuantizar(bd.crudas, bd.pulso, bd.pulso.div);
         toast(notas.length ? "Encontré " + notas.length + " notas. Revisa y toca Guardar cambios." : "No encontré notas en este audio");
       }catch(err){ toast("No pude analizar el audio: " + err.message); }
     }
@@ -996,7 +1119,7 @@ $("#lista").addEventListener("click", async e => {
     const texto = bd.texto.trim();
     const etiquetas = bd.etiquetas.split(",").map(s=>s.trim().replace(/^#/,"")).filter(Boolean);
     const cambios = {titulo, texto, etiquetas};
-    if(f.tipo === "melodia"){ cambios.notas = bd.notas; cambios.tonalidad = estimarTonalidad(bd.notas); }
+    if(f.tipo === "melodia"){ cambios.notas = bd.notas; cambios.crudas = bd.crudas; cambios.pulso = bd.pulso; cambios.tonalidad = estimarTonalidad(bd.notas); }
     editando = null; borrador = null; await actualizar(f, cambios); toast("Cambios guardados");
   }
   else if(a === "borrar"){ confirmando = id; renderLista(); }
@@ -1047,7 +1170,15 @@ async function api(accion, datos={}){
 const blobAb64 = b => new Promise((ok, mal) => { const fr = new FileReader(); fr.onload = () => ok(String(fr.result).split(",")[1] || ""); fr.onerror = mal; fr.readAsDataURL(b); });
 function b64aBlob(b64, mime){ const bin = atob(b64), u = new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) u[i] = bin.charCodeAt(i); return new Blob([u], {type:mime}); }
 const CAMPOS = ["id","tipo","titulo","texto","notas","tonalidad","etiquetas","fav","creado","actualizado","dur","mime","tieneAudio"];
-const limpio = f => Object.fromEntries(CAMPOS.map(k => [k, f[k]]));
+const limpio = f => {
+  const o = Object.fromEntries(CAMPOS.map(k => [k, f[k]]));
+  if(f.pulso || f.crudas) o.notas = {lista: f.notas || [], crudas: f.crudas || null, pulso: f.pulso || null};
+  return o;
+};
+const desempacar = x => {
+  if(x.notas && !Array.isArray(x.notas)){ x.crudas = x.notas.crudas || null; x.pulso = x.notas.pulso || null; x.notas = x.notas.lista || []; }
+  return x;
+};
 
 function chip(e, txt, titulo=""){ const s = $("#sync"); s.dataset.e = e; s.textContent = txt; s.title = titulo; }
 function chipReposo(){
@@ -1073,7 +1204,7 @@ async function sincronizar(){
       await api("guardar", datos);
       f.estado = "ok"; f.enServidor = true; if(datos.audio) f.audioSubido = true; await dbPoner(f);
     }
-    const r = await api("listar");
+    const r = await api("listar"); r.frags.forEach(desempacar);
     const remotos = new Map(r.frags.map(x => [x.id, x]));
     let cambio = false;
     for(const x of r.frags){
@@ -1101,7 +1232,7 @@ setInterval(() => { if(document.visibilityState === "visible" && !rec) sincroniz
 /* ============ Ajustes ============ */
 const dlg = $("#dlgAjustes");
 $("#btnAjustes").addEventListener("click", () => {
-  $("#cfgUrl").value = cfg.url; $("#cfgClave").value = cfg.clave; $("#cfgNotacion").value = cfg.notacion; $("#estadoPrueba").textContent = "";
+  $("#cfgUrl").value = cfg.url; $("#cfgClave").value = cfg.clave; $("#cfgNotacion").value = cfg.notacion; $("#cfgPulso").value = cfg.pulso || "no"; $("#cfgBpm").value = cfg.bpm || 90; $("#estadoPrueba").textContent = "";
   dlg.showModal();
 });
 $("#btnCerrar").addEventListener("click", () => dlg.close());
@@ -1113,7 +1244,7 @@ $("#btnProbar").addEventListener("click", async () => {
   Object.assign(cfg, prev);
 });
 $("#btnGuardarCfg").addEventListener("click", () => {
-  cfg.url = $("#cfgUrl").value.trim(); cfg.clave = $("#cfgClave").value.trim(); cfg.notacion = $("#cfgNotacion").value;
+  cfg.url = $("#cfgUrl").value.trim(); cfg.clave = $("#cfgClave").value.trim(); cfg.notacion = $("#cfgNotacion").value; cfg.pulso = $("#cfgPulso").value; cfg.bpm = Math.max(40, Math.min(200, Math.round(+$("#cfgBpm").value || 90)));
   guardarCfg(); dlg.close(); renderLista(); toast("Ajustes guardados"); programarSync(100);
 });
 
