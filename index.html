@@ -84,6 +84,8 @@ header.top{display:flex;align-items:center;gap:12px;padding-block:6px 14px}
 .modos input:checked+label{background:var(--surface);color:var(--c);box-shadow:0 1px 3px rgba(0,0,0,.12)}
 .modos input:focus-visible+label{outline:2px solid var(--c)}
 .vivo{min-height:190px;border-radius:14px;background:var(--surface-2);position:relative;overflow:hidden;display:flex;flex-direction:column}
+.cuenta-atras{position:absolute;inset:0;display:grid;place-items:center;background:var(--surface-2);font-family:var(--display);font-size:84px;line-height:1;color:var(--melodia);z-index:2}
+.cuenta-atras small{display:block;font-family:var(--body);font-size:13px;color:var(--muted);text-align:center;margin-top:6px}
 .vivo .ayuda{margin:auto;padding:18px;text-align:center;color:var(--muted);max-width:34ch;font-size:14px}
 .vivo .ayuda b{color:var(--ink);font-weight:600}
 #lienzo{width:100%;height:190px;display:block}
@@ -431,6 +433,7 @@ function segmentarNotas(cuadros, paso){
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const MAX_SEG = 300;
 let rec = null; // estado de la grabación en curso
+let cuenta = null, iniciando = false; // cuenta 3-2-1 en curso / micrófono abriéndose
 
 function modoActual(){ return document.querySelector('input[name="modo"]:checked').value; }
 
@@ -453,6 +456,30 @@ async function iniciar(){
   }catch(e){
     return mostrarAviso("No pude usar el micrófono. Revisa que el navegador tenga permiso de micrófono para esta página y vuelve a intentar.");
   }
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  const ctx = new Ctx(); if(ctx.state === "suspended") await ctx.resume();
+  const fuente = ctx.createMediaStreamSource(stream);
+  const an = ctx.createAnalyser(); an.fftSize = 2048; fuente.connect(an);
+
+  // El micrófono del teléfono tarda un momento en estabilizarse al abrirse: lo primero que se
+  // canta se pierde o sale bajo. En Melodía hay además una cuenta 3-2-1 para entrar a tiempo.
+  const c = cuenta = {cancelada:false};
+  $("#btnRec").setAttribute("aria-pressed","true"); $("#btnRec").setAttribute("aria-label","Cancelar");
+  if(modo === "melodia"){
+    const el = document.createElement("div"); el.className = "cuenta-atras"; $("#vivo").appendChild(el);
+    for(const n of ["3","2","1"]){
+      el.innerHTML = n + "<small>prepárate</small>";
+      await new Promise(r => setTimeout(r, 450));
+      if(c.cancelada) break;
+    }
+    el.remove();
+  } else await new Promise(r => setTimeout(r, 300));
+  cuenta = null;
+  if(c.cancelada){
+    stream.getTracks().forEach(tr => tr.stop()); try{ ctx.close(); }catch(e){}
+    $("#btnRec").setAttribute("aria-pressed","false"); $("#btnRec").setAttribute("aria-label","Grabar");
+    return;
+  }
   const mime = mimeAudio();
   let mr = null, trozos = [];
   if(window.MediaRecorder){
@@ -461,10 +488,6 @@ async function iniciar(){
     mr.ondataavailable = e => { if(e.data && e.data.size) trozos.push(e.data); };
     mr.start(1000);
   }
-  const Ctx = window.AudioContext || window.webkitAudioContext;
-  const ctx = new Ctx(); if(ctx.state === "suspended") await ctx.resume();
-  const fuente = ctx.createMediaStreamSource(stream);
-  const an = ctx.createAnalyser(); an.fftSize = 2048; fuente.connect(an);
 
   rec = { modo, stream, mr, trozos, mime: (mr && mr.mimeType) || mime || "audio/webm", ctx, an, buf:new Float32Array(an.fftSize),
           t0: performance.now(), texto:"", prov:"", notas:[], traza:[], cuadros:[], cur:null, curIni:0, ultVoz:0, cand:null, candN:0, candIni:0, frame:0, wake:null, sr:null, srFallo:false };
@@ -751,7 +774,8 @@ function dibujarNivel(t){
 
 /* ============ Reproducción ============ */
 let reproduciendo = null; // {id, tipo:'audio'|'notas', parar()}
-function pararTodo(){ if(reproduciendo){ const r = reproduciendo; reproduciendo = null; r.parar(); renderLista(); } }
+let turnoSonido = 0;
+function pararTodo(){ turnoSonido++; if(reproduciendo){ const r = reproduciendo; reproduciendo = null; r.parar(); renderLista(); } }
 async function tocarAudio(f){
   pararTodo();
   let blob = await audioGet(f.id);
@@ -786,14 +810,20 @@ function sonidoIOS(activar){
     } else if(silencioIOS) silencioIOS.pause();
   }catch(e){}
 }
-function tocarNotas(f, instr){
+async function tocarNotas(f, instr){
   pararTodo();
   if(!f.notas || !f.notas.length) return;
+  const turno = ++turnoSonido;
   const Ctx = window.AudioContext || window.webkitAudioContext;
   if(ctxSintesis && ctxSintesis.state === "closed") ctxSintesis = null;
   ctxSintesis = ctxSintesis || new Ctx(); const ctx = ctxSintesis;
-  if(ctx.state !== "running") ctx.resume().catch(()=>{});
+  const reanudar = ctx.state !== "running" ? ctx.resume().catch(()=>{}) : null;
   sonidoIOS(true);
+  // En iPhone, al activar el sonido los primeros instantes se pierden o salen apurados:
+  // se espera a que el audio se asiente y recién ahí se programan las notas.
+  if(reanudar) await reanudar;
+  await new Promise(r => setTimeout(r, 250));
+  if(turno !== turnoSonido) return;
   // En iPhone el sonido puede quedar "interrumpido" al cambiar de modo; se reanuda solo.
   ctx.onstatechange = () => { if(reproduciendo && reproduciendo.tipo === "notas" && ctx.state !== "running" && ctx.state !== "closed") ctx.resume().catch(()=>{}); };
   const salida = ctx.createGain(); salida.gain.value = 0.35; salida.connect(ctx.destination);
@@ -994,7 +1024,9 @@ $("#btnRec").addEventListener("click", async () => {
       creado:ahora(), actualizado:ahora(), dur:0, mime:"", tieneAudio:false, estado:"pendiente", audioSubido:false };
     await dbPoner(f); frags.unshift(f); $("#areaTexto").value = ""; renderLista(f.id); toast("Guardado en la libreta"); programarSync(); return;
   }
-  if(rec) detener(); else iniciar();
+  if(cuenta){ cuenta.cancelada = true; return; }
+  if(iniciando) return;
+  if(rec) detener(); else { iniciando = true; try{ await iniciar(); } finally{ iniciando = false; } }
 });
 document.querySelectorAll('input[name="modo"]').forEach(r => r.addEventListener("change", () => {
   if(rec) detener();
