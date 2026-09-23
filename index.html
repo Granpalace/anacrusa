@@ -3,15 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Semillero musical</title>
+<title>Anacrusa</title>
 <meta name="description" content="Libreta para capturar ideas musicales: letras, tarareos y sonidos.">
 <meta name="theme-color" content="#1C1B26">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Semillero">
+<meta name="apple-mobile-web-app-title" content="Anacrusa">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="icon" href="icono-192.png">
-<link rel="apple-touch-icon" href="icono-180.png">
+<link rel="icon" href="anacrusa.png">
+<link rel="apple-touch-icon" href="anacrusa.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Figtree:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
@@ -60,7 +60,12 @@ button{cursor:pointer}
 
 /* Cabecera */
 header.top{display:flex;align-items:center;gap:12px;padding-block:6px 14px}
-.marca{font-family:var(--display);font-size:32px;line-height:1;letter-spacing:.2px;margin:0;font-weight:400}
+.marca{font-family:var(--display);font-size:32px;line-height:1;letter-spacing:.2px;margin:0;font-weight:400;display:flex;align-items:center;gap:8px}
+.marca svg{width:30px;height:30px;flex:none}
+.bienvenida{display:grid;gap:8px;background:var(--melodia-soft);border-radius:12px;padding:12px 14px;font-size:14px}
+.bienvenida b{font-weight:600}
+.bienvenida ul{margin:0;padding-left:18px}
+.enlace{font-family:var(--mono);font-size:13px;background:var(--surface-2);border-radius:9px;padding:10px 12px;overflow-wrap:anywhere;user-select:all}
 .marca em{font-style:italic;color:var(--muted);font-size:.62em;margin-left:6px}
 .sync{margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);
   background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:5px 11px;white-space:nowrap;max-width:52vw;overflow:hidden;text-overflow:ellipsis}
@@ -184,8 +189,11 @@ dialog::backdrop{background:rgba(10,10,20,.5)}
 <body>
 <div class="wrap">
   <header class="top">
-    <h1 class="marca">Semillero<em>musical</em></h1>
+    <h1 class="marca"><svg viewBox="0 0 48 48" aria-hidden="true"><path d="M9 20 Q24 2 39 20" stroke="var(--muted)" stroke-width="2.4" fill="none" stroke-linecap="round"/><circle cx="10" cy="27" r="5.5" fill="var(--rec)"/><rect x="22.5" y="19" width="3" height="23" rx="1.5" fill="var(--ink)"/><circle cx="38" cy="27" r="5" fill="none" stroke="var(--ink)" stroke-width="2.4"/></svg>Anacrusa</h1>
     <span class="sync" id="sync" data-e="">Solo en este equipo</span>
+    <button class="icono-btn" id="btnInvitar" aria-label="Invitar a alguien a probar Anacrusa">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 8l5-5 5 5M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg>
+    </button>
     <button class="icono-btn" id="btnAjustes" aria-label="Ajustes">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
     </button>
@@ -193,6 +201,12 @@ dialog::backdrop{background:rgba(10,10,20,.5)}
 
   <main class="grid">
     <section id="captura" aria-label="Capturar una idea">
+      <div class="bienvenida" id="bienvenida" hidden>
+        <div><b>Bienvenido a Anacrusa.</b> Elige qué vas a capturar (una letra, una melodía tarareada o silbada, un sonido o una idea escrita) y toca el botón rojo.</div>
+        <div>Todo queda guardado en este teléfono; nadie más lo ve. Para tenerla como app:</div>
+        <ul><li><b>iPhone (Safari):</b> Compartir → Agregar a pantalla de inicio.</li><li><b>Android (Chrome):</b> menú ⋮ → Instalar app.</li></ul>
+        <div><button class="btn" id="btnBienvenida" type="button">Entendido</button></div>
+      </div>
       <div class="modos" role="radiogroup" aria-label="Qué vas a capturar">
         <input type="radio" name="modo" id="m-letra" value="letra" checked><label for="m-letra" style="--c:var(--letra)">Letra</label>
         <input type="radio" name="modo" id="m-melodia" value="melodia"><label for="m-melodia" style="--c:var(--melodia)">Melodía</label>
@@ -236,10 +250,24 @@ dialog::backdrop{background:rgba(10,10,20,.5)}
   </main>
 </div>
 
+<dialog id="dlgInvitar">
+  <div class="dlg">
+    <h2>Invita a probar Anacrusa</h2>
+    <p>Comparte este link. Cada persona que lo abra tiene su propia libreta, guardada en su teléfono: nadie ve tus ideas ni tú las suyas.</p>
+    <div class="enlace" id="enlaceApp"></div>
+    <div class="estado-prueba" id="estadoInvitar"></div>
+    <div class="fila">
+      <button type="button" class="btn" id="btnCerrarInvitar">Cerrar</button>
+      <button type="button" class="btn" id="btnCopiarLink">Copiar link</button>
+      <button type="button" class="btn prim" id="btnCompartirLink">Compartir</button>
+    </div>
+  </div>
+</dialog>
+
 <dialog id="dlgAjustes">
   <form class="dlg" method="dialog" id="formAjustes">
     <h2>Ajustes</h2>
-    <p>Para que tus fragmentos se guarden en tu Google Drive y aparezcan en el celular y en el PC, pega aquí la dirección del servidor y la clave (están en la guía de instalación). Sin esto, todo queda guardado solo en este equipo.</p>
+    <p>Opcional: para que tus ideas se guarden en tu Google Drive y aparezcan en el celular y en el PC, pega aquí la dirección de tu servidor y tu clave (están en la guía de instalación). Sin esto, todo queda guardado solo en este equipo.</p>
     <label for="cfgUrl">Dirección del servidor (Apps Script)
       <input id="cfgUrl" type="url" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off">
     </label>
@@ -1231,6 +1259,21 @@ setInterval(() => { if(document.visibilityState === "visible" && !rec) sincroniz
 
 /* ============ Ajustes ============ */
 const dlg = $("#dlgAjustes");
+/* ============ Invitar a probar ============ */
+const linkApp = () => location.origin + location.pathname.replace(/index\.html$/, "");
+$("#btnInvitar").addEventListener("click", () => { $("#enlaceApp").textContent = linkApp(); $("#estadoInvitar").textContent = ""; $("#dlgInvitar").showModal(); });
+$("#btnCerrarInvitar").addEventListener("click", () => $("#dlgInvitar").close());
+$("#btnCopiarLink").addEventListener("click", async () => {
+  try{ await navigator.clipboard.writeText(linkApp()); $("#estadoInvitar").textContent = "Link copiado."; }
+  catch(e){ const r = document.createRange(); r.selectNodeContents($("#enlaceApp")); const s = getSelection(); s.removeAllRanges(); s.addRange(r); $("#estadoInvitar").textContent = "Selecciona el link y cópialo."; }
+});
+$("#btnCompartirLink").addEventListener("click", async () => {
+  const datos = {title:"Anacrusa", text:"Prueba Anacrusa, una libreta para guardar ideas musicales: tararea, silba o dicta una letra y queda guardada.", url:linkApp()};
+  if(navigator.share){ try{ await navigator.share(datos); return; }catch(e){ if(e.name === "AbortError") return; } }
+  $("#btnCopiarLink").click();
+});
+$("#btnBienvenida").addEventListener("click", () => { $("#bienvenida").hidden = true; try{ localStorage.setItem("anacrusa.bienvenida","1"); }catch(e){} });
+
 $("#btnAjustes").addEventListener("click", () => {
   $("#cfgUrl").value = cfg.url; $("#cfgClave").value = cfg.clave; $("#cfgNotacion").value = cfg.notacion; $("#cfgPulso").value = cfg.pulso || "no"; $("#cfgBpm").value = cfg.bpm || 90; $("#estadoPrueba").textContent = "";
   dlg.showModal();
@@ -1270,6 +1313,8 @@ function ejemplos(){
     frags = await dbTodos();
     let primera = true; try{ primera = !localStorage.getItem("semillero.iniciado"); localStorage.setItem("semillero.iniciado","1"); }catch(e){}
     if(!frags.length && primera){ for(const f of ejemplos()){ await dbPoner(f); frags.push(f); } }
+    let visto = false; try{ visto = !!localStorage.getItem("anacrusa.bienvenida"); }catch(e){}
+    if(!cfg.url && !visto) $("#bienvenida").hidden = false;
   }catch(e){ mostrarAviso("Este navegador no deja guardar datos (¿ventana privada?). Lo que grabes se perderá al cerrar."); }
   renderLista(); chipReposo();
   if(cfg.url) programarSync(400);
